@@ -1,3 +1,5 @@
+// Program Ver. IAS000
+
 #include <Wire.h>
 
 #define FPSC 0x02

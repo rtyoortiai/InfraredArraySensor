@@ -1,49 +1,90 @@
-// Program Ver. IAS001
+// Program Ver. IAS002
 
 #include <Wire.h>
-
-// レジスタアドレス(https://docid81hrs3j1.cloudfront.net/medialibrary/2017/11/PANA-S-A0002141979-1.pdf)
-#define PCLT  (0x00)  // パワーコントロールレジスタ(R/W)[7:0] (初期値0x00(ノーマルモード))
-#define RST   (0x01)  // リセットレジスタ(W)[7:0]
-#define FPSC  (0x02)  // フレームレートレジスタ(R/W)[0:0] (0x00: 10fps, 0x01: 1fps) (初期値0x00)
-#define INTC  (0x03)  // 割り込みコントロールレジスタ(R/W)[1:0]
-#define STAT  (0x04)  // ステータスレジスタ(R)[2:1]
-#define SCLR  (0x05)  // ステータスクリアレジスタ(W)[2:1]
-#define AVE   (0x07)  // アベレージレジスタ(R/W)[5:5]
-                      // 2回移動平均出力モード有効にする場合       2回移動平均出力モードを無効にする場合
-                      // Address  R/W   Value                 Address   R/W   Value
-                      // 0x1F     W     0x50                  0x1F      W     0x50
-                      // 0x1F     W     0x45                  0x1F      W     0x45
-                      // 0x1F     W     0x57                  0x1F      W     0x57
-                      // 0x07     W     0x20                  0x1F      W     0x00
-                      // 0x1F     W     0x00                  0x1F      W     0x00
-#define T01L  (0x80)  // 低位ビット側の温度レジスタ(R)[7:0]  (符号データ含め12 bit)
-
-#define AMG88_ADDR  (0x68) // I2Cスレーブアドレス in 7bit
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <ESPmDNS.h>
+#include <WebServer.h>
+#include "AMG8833.h"
 
 // I2C通信のピンID
 #define SDA_PIN_ID  (21)
 #define SCL_PIN_ID  (22)
 
-#define DEG_PER_BIT (0.25)  // 0000_0000_0001 = 0.25 deg
+// 赤外線アレイセンサのインスタンス生成
+AMG8833 amg8833(AMG88_ADDR);
 
-void write8(int id, int reg, int data) {  // idで示されるデバイスにregとdataを書く
-    Wire.beginTransmission(id);  // 送信先のI2Cアドレスを指定して送信の準備をする
-    Wire.write(reg);  // regをキューイングする
-    Wire.write(data);  // dataをキューイングする
-    uint8_t result = Wire.endTransmission();  // キューイングしたデータを送信する
+// WiFiのSSID, Password
+const char *ssid = "your_ssid";
+const char *password = "your_password";
+
+// サーバーのインスタンス生成
+WebServer server(80);
+
+// heat関数(heat.cpp)の宣言
+uint32_t heat(float x);
+
+// グローバル変数
+float temp[64];
+unsigned long lastT = 0;
+
+void handleRoot() {
+    String msg = "hello";  // レスポンスメッセージを用意
+    Serial.println(msg);
+    server.send(200, "text/plain", msg);  // レスポンスを返信する
 }
 
-void dataread(int id, int reg, int *data, int datasize) {
-    Wire.beginTransmission(id);  // 送信先のI2Cアドレスを指定して送信の準備をする
-    Wire.write(reg);  // regをキューイングする
-    Wire.endTransmission();  // キューイングしたデータを送信する
+void handleCapture() {  // /captureをアクセスされたときの処理
+    char buf[400];
 
-    Wire.requestFrom(id, datasize);  // データを受信する先のI2Cアドレスとバイト数を指定する
-    int i = 0;
-    while (Wire.available() && i < datasize) {
-        data[i++] = Wire.read();  // 指定したバイト数分、データを読む
+    snprintf(buf, 400,  // thermal.svgというファイルをアクセスするHTMLを作る
+   "<html>\
+    <body>\
+        <div align=\"center\">\
+            <img src=\"/thermal.svg\" width=\"400\" height=\"400\" />\
+        </div>\
+    </body>\
+    </html>"
+          );
+    server.send(200, "text/html", buf);  // HTMLを返信する
+}
+
+void handleThermal() {  // /thermal.svgの処理関数
+    String out = "";
+    char buf[100];  // AMG8833の画素データを
+    out += "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\">\n";
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            float t = temp[(8 - y - 1) * 8 + 8 - x - 1];
+            uint32_t color = heat(map(constrain((int)t, 0, 40), 0, 40, 0, 100) / 100.0);
+            Serial.printf("%2.1f ", t);
+            sprintf(buf, "<rect x=\"%d\" y=\"%d\" width=\"50\" height=\"50\" fill=\"#%06x\" />\n",
+                x * 50, y * 50, color);
+            out += buf;
+        }
+        Serial.println();
     }
+    Serial.println("--------------------------------");
+    out += "</svg>\n";
+
+    server.send(200, "image/svg+xml", out);
+}
+
+void handleNotFound() {
+    String message = "File Not Found\n\n";
+    message += "URI: ";
+    message += server.uri();
+    message += "\nMethod: ";
+    message += (server.method() == HTTP_GET) ? "GET" : "POST";
+    message += "\nArguments: ";
+    message += server.args();
+    message += "\n";
+
+    for (uint8_t i = 0; i < server.args(); i++) {
+        message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
+    }
+
+    server.send(404, "text/plain", message);
 }
 
 void setup() {
@@ -53,36 +94,42 @@ void setup() {
     pinMode(SDA_PIN_ID, INPUT_PULLUP);  // SDAをプルアップする
     pinMode(SCL_PIN_ID, INPUT_PULLUP);  // SCLをプルアップする
     Wire.begin();
+    amg8833.begin();
     
-    write8(AMG88_ADDR, FPSC, 0x00);   // 10fps
-    write8(AMG88_ADDR, INTC, 0x00);   // INT出力無効
-    write8(AMG88_ADDR, 0x1F, 0x50);   // 移動平均出力モード有効(ここから)
-    write8(AMG88_ADDR, 0x1F, 0x45);
-    write8(AMG88_ADDR, 0x1F, 0x57);
-    write8(AMG88_ADDR, AVE,  0x20);   // 2回移動平均出力を有効に設定
-    write8(AMG88_ADDR, 0x1F, 0x00);   // 移動平均出力モード有効(ここまで)
+    WiFi.mode(WIFI_STA);
+    Serial.println("");
+    
+    // Wait for connection
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    
+    Serial.println("");
+    Serial.print("Connected to ");
+    Serial.println(ssid);
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+
+    if (MDNS.begin("thermoCam")) {
+        Serial.println("MDNS responder started");
+    }
+
+    server.on("/", handleRoot);
+    server.on("/capture", handleCapture);  // /captureの処理関数を登録  ----④
+    server.on("/thermal.svg", handleThermal);  // /thermal.svgの処理関数を登録
+    server.onNotFound(handleNotFound);
+    server.begin();
+    Serial.println("access: http://thermoCam.local/capture");
 }
 
 void loop() {
-    float temp[64];  // 8 x 8 の温度データ
+    server.handleClient();
 
-    int sensorData[128];
-    dataread(AMG88_ADDR, T01L, sensorData, 128);  // 128バイト(= 2byte/data * 8 * 8)のピクセルデータを読む
-    for (int i = 0 ; i < 64 ; i++) {
-        int16_t temporaryData = (sensorData[i * 2 + 1] << 8) + sensorData[i * 2];  // 上位バイトと下位バイトから温度データを作る
-        if(temporaryData > 0x200) {  // マイナスの場合
-            temp[i] = (-temporaryData +  0xfff) * -DEG_PER_BIT;
-        } else {                     // プラスの場合 
-            temp[i] = temporaryData * DEG_PER_BIT;
-        }
-    }
+    if ((millis() - lastT) > 500) {
+        lastT = millis();
 
-    for (int y = 0; y < 8; y++) {  // 8 x 8の温度データをシリアルモニタに出力する
-        for (int x = 0; x < 8; x++) {
-            Serial.printf("%2.1f ", temp[(8 - y - 1) * 8 + 8 - x - 1]);
-        }
-        Serial.println();
+        amg8833.read(temp);  // AMG8833から温度データを取得
     }
-    Serial.println("--------------------------------");
-    delay(5000);
 }

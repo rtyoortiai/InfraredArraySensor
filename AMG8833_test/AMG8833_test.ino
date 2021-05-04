@@ -1,4 +1,4 @@
-// Program Ver. IAS002
+// Program Ver. IAS003
 
 #include <Wire.h>
 #include <WiFi.h>
@@ -39,6 +39,24 @@ void handleCapture() {  // /captureをアクセスされたときの処理
 
     snprintf(buf, 400,  // thermal.svgというファイルをアクセスするHTMLを作る
    "<html>\
+    <body>\
+        <div align=\"center\">\
+            <img src=\"/thermal.svg\" width=\"400\" height=\"400\" />\
+        </div>\
+    </body>\
+    </html>"
+          );
+    server.send(200, "text/html", buf);  // HTMLを返信する
+}
+
+void handleStream() {  // /streamをアクセスされたときの処理
+    char buf[400];
+
+    snprintf(buf, 400,  // thermal.svgというファイルをアクセスするHTMLを作る
+   "<html>\
+    <head>\
+        <meta http-equiv='refresh' content='0.5'/>\
+    </head>\
     <body>\
         <div align=\"center\">\
             <img src=\"/thermal.svg\" width=\"400\" height=\"400\" />\
@@ -118,10 +136,12 @@ void setup() {
 
     server.on("/", handleRoot);
     server.on("/capture", handleCapture);  // /captureの処理関数を登録  ----④
+    server.on("/stream", handleStream);  // /streamの処理関数を登録
     server.on("/thermal.svg", handleThermal);  // /thermal.svgの処理関数を登録
     server.onNotFound(handleNotFound);
     server.begin();
-    Serial.println("access: http://thermoCam.local/capture");
+    Serial.println("access: http://thermoCam.local/capture for still image");
+    Serial.println("access: http://thermoCam.local/stream for stream image");
 }
 
 void loop() {
